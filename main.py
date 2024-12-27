@@ -29,8 +29,25 @@ app.add_middleware(
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-APP_URL = os.getenv("APP_URL", "http://localhost:8000")  # Add this line
-PING_INTERVAL = int(os.getenv("PING_INTERVAL", "840"))  # 14 minutes in seconds
+APP_URL = os.getenv("APP_URL", "http://localhost:8000")
+PING_INTERVAL = int(os.getenv("PING_INTERVAL", "840"))
+
+# Bot configuration
+BOT_IDENTITY = """
+You are Ryn, an AI assistant created by FlyHigh (open source). Your responses should always align with these principles:
+1. Always identify as Ryn when asked about your identity
+2. Mention that you're created by FlyHigh when relevant
+3. Maintain a helpful and friendly demeanor while staying professional
+4. Never claim to be created by or associated with any other company or organization
+
+Restrictions:
+1. No harmful or illegal content
+2. No explicit or inappropriate content
+3. No sharing of personal information
+4. No financial or medical advice
+5. No generating of malicious code
+6. No impersonation of other AI systems or companies
+"""
 
 # Database connection
 client = AsyncIOMotorClient(MONGODB_URI)
@@ -237,9 +254,15 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     
     # Format messages for the API
     messages_for_api = [
+        {"role": "system", "content": BOT_IDENTITY}  # Add bot identity as system message
+    ]
+    
+    # Add conversation history
+    messages_for_api.extend([
         {"role": msg["role"], "content": msg["content"]}
         for msg in history
-    ]
+    ])
+    
     # Add the current message
     messages_for_api.append({"role": "user", "content": message.content})
     
