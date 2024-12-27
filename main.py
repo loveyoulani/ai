@@ -8,7 +8,8 @@ import jwt
 import bcrypt
 import os
 from pydantic import BaseModel
-from groq import AsyncGroq
+import httpx
+from groq import Groq
 
 app = FastAPI()
 
@@ -30,8 +31,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = AsyncIOMotorClient(MONGODB_URI)
 db = client.chatapp
 
-# Groq client
-groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+# Groq client - Using synchronous client instead of async
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Pydantic models
 class UserCreate(BaseModel):
@@ -158,8 +159,8 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     await db.messages.insert_one(user_message)
     
     try:
-        # Get response from Groq
-        chat_completion = await groq_client.chat.completions.create(
+        # Get response from Groq using synchronous client
+        chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": message.content}],
             model="mixtral-8x7b-32768",
             temperature=0.7
