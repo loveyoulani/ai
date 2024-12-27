@@ -12,6 +12,8 @@ import os
 from groq import Groq
 import asyncio
 import httpx
+from collections import deque
+import json
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -28,15 +30,51 @@ app.add_middleware(
 # Environment variables
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 APP_URL = os.getenv("APP_URL", "http://localhost:8000")
 PING_INTERVAL = int(os.getenv("PING_INTERVAL", "840"))
 
+# API Key Management
+class APIKeyManager:
+    def __init__(self):
+        self.api_keys = deque()
+        self.current_key_index = 0
+        self.load_api_keys()
+
+    def load_api_keys(self):
+        # Load API keys from environment variable
+        api_keys_str = os.getenv("GROQ_API_KEYS", "")
+        if api_keys_str:
+            keys = [key.strip() for key in api_keys_str.split(",")]
+            self.api_keys.extend(keys)
+        else:
+            # Fallback to single API key
+            single_key = os.getenv("GROQ_API_KEY")
+            if single_key:
+                self.api_keys.append(single_key)
+
+    def get_next_key(self):
+        if not self.api_keys:
+            raise HTTPException(
+                status_code=500,
+                detail="No API keys available"
+            )
+        
+        # Rotate to the next key
+        self.api_keys.rotate(-1)
+        return self.api_keys[0]
+
+    def handle_rate_limit(self):
+        # If rate limited, rotate to next key
+        self.api_keys.rotate(-1)
+        return self.api_keys[0]
+
+api_key_manager = APIKeyManager()
+
 # Bot configuration
 BOT_IDENTITY = """
-You are Ryn, an AI assistant created by FlyHigh (open source). Your responses should always align with these principles:
+You are Ryn, an AI assistant created by FlyHigh (an independent developer). Your responses should always align with these principles:
 1. Always identify as Ryn when asked about your identity
-2. Mention that you're created by FlyHigh when relevant
+2. Mention that you're created by FlyHigh (an independent developer) when relevant
 3. Maintain a helpful and friendly demeanor while staying professional
 4. Never claim to be created by or associated with any other company or organization
 
@@ -53,10 +91,7 @@ Restrictions:
 client = AsyncIOMotorClient(MONGODB_URI)
 db = client.chatapp
 
-# Initialize Groq client
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-# Pydantic models
+# Pydantic models (same as before)
 class UserCreate(BaseModel):
     username: str
     password: str
@@ -82,6 +117,39 @@ class Session(BaseModel):
     userId: str
     name: Optional[str]
     createdAt: datetime = Field(default_factory=datetime.utcnow)
+
+# Helper function for chat completion with retry
+async def get_chat_completion(messages, max_retries=3):
+    retries = 0
+    while retries < max_retries:
+        try:
+            api_key = api_key_manager.get_next_key()
+            groq_client = Groq(api_key=api_key)
+            
+            chat_completion = groq_client.chat.completions.create(
+                messages=messages,
+                model="mixtral-8x7b-32768",
+                temperature=0.7,
+                max_tokens=4096,
+                top_p=1,
+                stream=False
+            )
+            
+            return chat_completion.choices[0].message.content
+            
+        except Exception as e:
+            error_str = str(e)
+            if "413" in error_str or "rate_limit_exceeded" in error_str:
+                print(f"Rate limit exceeded for key, rotating to next key. Error: {error_str}")
+                api_key_manager.handle_rate_limit()
+                retries += 1
+                if retries < max_retries:
+                    continue
+            
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate response after {retries} retries. Please try again."
+            )
 
 # Self-ping mechanism
 async def keep_alive():
@@ -254,7 +322,7 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     
     # Format messages for the API
     messages_for_api = [
-        {"role": "system", "content": BOT_IDENTITY}  # Add bot identity as system message
+        {"role": "system", "content": BOT_IDENTITY}
     ]
     
     # Add conversation history
@@ -276,17 +344,8 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     await db.messages.insert_one(user_message)
     
     try:
-        # Get response from Groq with conversation history
-        chat_completion = groq_client.chat.completions.create(
-            messages=messages_for_api,
-            model="mixtral-8x7b-32768",
-            temperature=0.7,
-            max_tokens=4096,
-            top_p=1,
-            stream=False
-        )
-        
-        assistant_response = chat_completion.choices[0].message.content
+        # Get response with retry mechanism
+        assistant_response = await get_chat_completion(messages_for_api)
         
         # Save assistant message
         assistant_message = {
