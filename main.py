@@ -9,7 +9,7 @@ import bcrypt
 import os
 from pydantic import BaseModel
 import httpx
-from groq.client import Groq
+from groq import Groq
 
 app = FastAPI()
 
