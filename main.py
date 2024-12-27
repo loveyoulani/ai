@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import DESCENDING
@@ -10,6 +10,8 @@ import jwt
 import bcrypt
 import os
 from groq import Groq
+import asyncio
+import httpx
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -27,6 +29,8 @@ app.add_middleware(
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+APP_URL = os.getenv("APP_URL", "http://localhost:8000")  # Add this line
+PING_INTERVAL = int(os.getenv("PING_INTERVAL", "840"))  # 14 minutes in seconds
 
 # Database connection
 client = AsyncIOMotorClient(MONGODB_URI)
@@ -62,6 +66,22 @@ class Session(BaseModel):
     name: Optional[str]
     createdAt: datetime = Field(default_factory=datetime.utcnow)
 
+# Self-ping mechanism
+async def keep_alive():
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                response = await client.get(f"{APP_URL}/api/health")
+                print(f"Keep-alive ping sent. Status: {response.status_code}")
+            except Exception as e:
+                print(f"Keep-alive ping failed: {str(e)}")
+            await asyncio.sleep(PING_INTERVAL)
+
+# Health check endpoint
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
+
 # Authentication middleware
 async def get_current_user(request: Request):
     auth_header = request.headers.get('Authorization')
@@ -73,7 +93,6 @@ async def get_current_user(request: Request):
         )
     
     try:
-        # Extract the token without 'Bearer ' prefix
         token = auth_header.split(' ')[1]
         payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
         
@@ -105,12 +124,10 @@ async def get_current_user(request: Request):
 # Auth routes
 @app.post("/api/register")
 async def register(user: UserCreate):
-    # Check if username already exists
     existing_user = await db.users.find_one({"username": user.username})
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already exists")
     
-    # Hash password and create user
     hashed_password = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt())
     user_dict = {
         "username": user.username,
@@ -120,7 +137,6 @@ async def register(user: UserCreate):
     
     result = await db.users.insert_one(user_dict)
     
-    # Create and return token
     token = jwt.encode(
         {
             "id": str(result.inserted_id),
@@ -135,16 +151,13 @@ async def register(user: UserCreate):
 
 @app.post("/api/login")
 async def login(user: UserLogin):
-    # Find user
     db_user = await db.users.find_one({"username": user.username})
     if not db_user:
         raise HTTPException(status_code=400, detail="User not found")
     
-    # Verify password
     if not bcrypt.checkpw(user.password.encode(), db_user["password"]):
         raise HTTPException(status_code=400, detail="Invalid password")
     
-    # Create and return token
     token = jwt.encode(
         {
             "id": str(db_user["_id"]),
@@ -164,7 +177,6 @@ async def get_sessions(user=Depends(get_current_user)):
         {"userId": user["_id"]}
     ).sort("createdAt", DESCENDING).to_list(length=None)
     
-    # Convert ObjectId to string
     for session in sessions:
         session["_id"] = str(session["_id"])
     
@@ -199,7 +211,6 @@ async def get_messages(session_id: str, user=Depends(get_current_user)):
         {"sessionId": session_id}
     ).sort("timestamp", 1).to_list(length=None)
     
-    # Convert ObjectId to string
     for message in messages:
         message["_id"] = str(message["_id"])
     
@@ -219,6 +230,19 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
+    # Get conversation history
+    history = await db.messages.find(
+        {"sessionId": message.sessionId}
+    ).sort("timestamp", 1).to_list(length=None)
+    
+    # Format messages for the API
+    messages_for_api = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in history
+    ]
+    # Add the current message
+    messages_for_api.append({"role": "user", "content": message.content})
+    
     # Save user message
     user_message = {
         "sessionId": message.sessionId,
@@ -229,9 +253,9 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     await db.messages.insert_one(user_message)
     
     try:
-        # Get response from Groq
+        # Get response from Groq with conversation history
         chat_completion = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": message.content}],
+            messages=messages_for_api,
             model="mixtral-8x7b-32768",
             temperature=0.7,
             max_tokens=4096,
@@ -252,7 +276,6 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
         
         return {"response": assistant_response}
     except Exception as e:
-        # Log the error but don't expose internal details
         print(f"Error in chat completion: {str(e)}")
         raise HTTPException(
             status_code=500,
@@ -262,10 +285,12 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
 # Startup and shutdown events
 @app.on_event("startup")
 async def startup_db_client():
-    # Ensure indexes
     await db.users.create_index("username", unique=True)
     await db.sessions.create_index([("userId", 1), ("createdAt", -1)])
     await db.messages.create_index([("sessionId", 1), ("timestamp", 1)])
+    
+    # Start the keep-alive task
+    asyncio.create_task(keep_alive())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
