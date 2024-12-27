@@ -9,14 +9,14 @@ import bcrypt
 import os
 from pydantic import BaseModel
 import httpx
-from groq import Groq
+from groq.client import Groq
 
 app = FastAPI()
 
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with your frontend URL in production
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,7 +31,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = AsyncIOMotorClient(MONGODB_URI)
 db = client.chatapp
 
-# Groq client - Using synchronous client instead of async
+# Initialize Groq client without additional configuration
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Pydantic models
