@@ -8,7 +8,7 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 from bson import ObjectId
 import jwt
-import bcrypt
+import bcrypt, uvivorn
 import os
 from groq import Groq
 import asyncio
