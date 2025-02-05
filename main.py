@@ -348,3 +348,15 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
             status_code=500,
             detail="Failed to generate response. Please try again."
         )
+
+
+PORT = int(os.getenv("PORT", "8000"))
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=PORT,
+        reload=False
+    )
