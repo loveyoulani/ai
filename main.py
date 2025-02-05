@@ -27,13 +27,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment variables
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key")
-APP_URL = os.getenv("APP_URL", "http://localhost:8000")
+MONGODB_URI = os.getenv("MONGODB_URI")
+JWT_SECRET = os.getenv("JWT_SECRET")
+APP_URL = os.getenv("APP_URL")
 PING_INTERVAL = int(os.getenv("PING_INTERVAL", "840"))
 
-# API Key Management
 class APIKeyManager:
     def __init__(self):
         self.api_keys = deque()
@@ -41,57 +39,29 @@ class APIKeyManager:
         self.load_api_keys()
 
     def load_api_keys(self):
-        # Load API keys from environment variable
         api_keys_str = os.getenv("GROQ_API_KEYS", "")
         if api_keys_str:
             keys = [key.strip() for key in api_keys_str.split(",")]
             self.api_keys.extend(keys)
         else:
-            # Fallback to single API key
             single_key = os.getenv("GROQ_API_KEY")
             if single_key:
                 self.api_keys.append(single_key)
 
     def get_next_key(self):
         if not self.api_keys:
-            raise HTTPException(
-                status_code=500,
-                detail="No API keys available"
-            )
-        
-        # Rotate to the next key
+            raise HTTPException(status_code=500, detail="No API keys available")
         self.api_keys.rotate(-1)
         return self.api_keys[0]
 
     def handle_rate_limit(self):
-        # If rate limited, rotate to next key
         self.api_keys.rotate(-1)
         return self.api_keys[0]
 
 api_key_manager = APIKeyManager()
-
-# Bot configuration
-BOT_IDENTITY = """
-You are Ryn, an AI assistant created by FlyHigh (an independent developer). Your responses should always align with these principles:
-1. Always identify as Ryn when asked about your identity
-2. Mention that you're created by FlyHigh (an independent developer) when relevant
-3. Maintain a helpful and friendly demeanor while staying professional
-4. Never claim to be created by or associated with any other company or organization
-
-Restrictions:
-1. No harmful or illegal content
-2. No explicit or inappropriate content
-3. No sharing of personal information
-4. No financial or medical advice
-5. No generating of malicious code
-6. No impersonation of other AI systems or companies
-"""
-
-# Database connection
 client = AsyncIOMotorClient(MONGODB_URI)
 db = client.chatapp
 
-# Pydantic models (same as before)
 class UserCreate(BaseModel):
     username: str
     password: str
@@ -118,7 +88,6 @@ class Session(BaseModel):
     name: Optional[str]
     createdAt: datetime = Field(default_factory=datetime.utcnow)
 
-# Helper function for chat completion with retry
 async def get_chat_completion(messages, max_retries=3):
     retries = 0
     while retries < max_retries:
@@ -128,8 +97,8 @@ async def get_chat_completion(messages, max_retries=3):
             
             chat_completion = groq_client.chat.completions.create(
                 messages=messages,
-                model="mixtral-8x7b-32768",
-                temperature=0.7,
+                model="deepseek-r1-distill-llama-70b",
+                temperature=0.6,
                 max_tokens=4096,
                 top_p=1,
                 stream=False
@@ -151,7 +120,6 @@ async def get_chat_completion(messages, max_retries=3):
                 detail=f"Failed to generate response after {retries} retries. Please try again."
             )
 
-# Self-ping mechanism
 async def keep_alive():
     async with httpx.AsyncClient() as client:
         while True:
@@ -162,12 +130,10 @@ async def keep_alive():
                 print(f"Keep-alive ping failed: {str(e)}")
             await asyncio.sleep(PING_INTERVAL)
 
-# Health check endpoint
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok"}
 
-# Authentication middleware
 async def get_current_user(request: Request):
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
@@ -255,7 +221,7 @@ async def login(user: UserLogin):
     
     return {"token": token}
 
-# Session routes
+
 @app.get("/api/sessions")
 async def get_sessions(user=Depends(get_current_user)):
     sessions = await db.sessions.find(
@@ -278,7 +244,6 @@ async def create_session(session: SessionCreate, user=Depends(get_current_user))
     session_dict["_id"] = str(result.inserted_id)
     return session_dict
 
-# Message routes
 @app.get("/api/messages/{session_id}")
 async def get_messages(session_id: str, user=Depends(get_current_user)):
     try:
@@ -304,7 +269,6 @@ async def get_messages(session_id: str, user=Depends(get_current_user)):
 @app.post("/api/chat")
 async def chat(message: MessageCreate, user=Depends(get_current_user)):
     try:
-        # Verify session belongs to user
         session = await db.sessions.find_one({
             "_id": ObjectId(message.sessionId),
             "userId": user["_id"]
@@ -315,26 +279,17 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Get conversation history
     history = await db.messages.find(
         {"sessionId": message.sessionId}
     ).sort("timestamp", 1).to_list(length=None)
     
-    # Format messages for the API
     messages_for_api = [
-        {"role": "system", "content": BOT_IDENTITY}
-    ]
-    
-    # Add conversation history
-    messages_for_api.extend([
         {"role": msg["role"], "content": msg["content"]}
         for msg in history
-    ])
+    ]
     
-    # Add the current message
     messages_for_api.append({"role": "user", "content": message.content})
     
-    # Save user message
     user_message = {
         "sessionId": message.sessionId,
         "role": "user",
@@ -344,10 +299,8 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
     await db.messages.insert_one(user_message)
     
     try:
-        # Get response with retry mechanism
         assistant_response = await get_chat_completion(messages_for_api)
         
-        # Save assistant message
         assistant_message = {
             "sessionId": message.sessionId,
             "role": "assistant",
@@ -364,20 +317,14 @@ async def chat(message: MessageCreate, user=Depends(get_current_user)):
             detail="Failed to generate response. Please try again."
         )
 
-# Startup and shutdown events
 @app.on_event("startup")
 async def startup_db_client():
     await db.users.create_index("username", unique=True)
     await db.sessions.create_index([("userId", 1), ("createdAt", -1)])
     await db.messages.create_index([("sessionId", 1), ("timestamp", 1)])
     
-    # Start the keep-alive task
     asyncio.create_task(keep_alive())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
